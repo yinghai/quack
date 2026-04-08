@@ -2,19 +2,19 @@
 """pytest configuration for quack kernel tests.
 
 Supports:
-  --compile-only    Compile all kernels (populating .o cache), skip actual execution.
+  --compile-only    Compile all kernels (populating the persistent cache), skip actual execution.
                     Uses FakeTensorMode (no GPU memory) so you can use many xdist workers.
                     Works without a GPU if QUACK_ARCH and CUTE_DSL_ARCH are set.
 
 Two-pass workflow (after changing kernel source):
   pytest tests/test_softmax.py --compile-only -n 64   # parallel compile, no GPU memory
-  pytest tests/test_softmax.py                         # instant .o loads
+  pytest tests/test_softmax.py                         # instant cache hits
 
 CPU-only compilation (no GPU needed):
   QUACK_ARCH=90 CUTE_DSL_ARCH=sm_90a pytest tests/ --compile-only -n 64
 
 Single-pass workflow (cache already warm):
-  pytest tests/test_softmax.py                         # all .o cache hits
+  pytest tests/test_softmax.py                         # all cache hits
 
 Multi-GPU with xdist:
   pytest tests/ -n 4                                   # workers round-robin across GPUs
@@ -41,7 +41,7 @@ def pytest_addoption(parser):
         "--compile-only",
         action="store_true",
         default=False,
-        help="Compile all kernels and export .o cache, skip actual kernel execution. "
+        help="Compile all kernels and export the persistent cache, skip actual kernel execution. "
         "Use with -n N (pytest-xdist) for parallel compilation.",
     )
 

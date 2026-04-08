@@ -141,14 +141,14 @@ class Autotuner:
         return self._do_bench
 
     def _precompile(self, *args, configs, **kwargs):
-        """Pre-compile all configs in parallel subprocesses to populate .o cache.
+        """Pre-compile all configs in parallel subprocesses to populate the cache.
 
         cute.compile() is not thread-safe (MLIR thread-local state) and fork after
         CUDA init causes segfaults. So we spawn persistent subprocess workers: each
         has its own CUDA context, creates FakeTensors matching the parent's tensor
         metadata, and compiles with COMPILE_ONLY=True. Workers stay alive to amortize
         import overhead across multiple configs. The parent then loads instantly from
-        the .o cache during benchmarking.
+        the persistent cache during benchmarking.
         """
         from quack.cache_utils import CACHE_ENABLED
 
@@ -159,7 +159,7 @@ class Autotuner:
         if max_workers <= 1:
             return
 
-        # Quick check: compile first config in-process. If it loads from .o cache
+        # Quick check: compile first config in-process. If it loads from cache
         # (<0.5s), the rest are likely cached too — skip spawning workers.
         t_check = time.time()
         try:
