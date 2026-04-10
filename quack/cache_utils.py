@@ -302,7 +302,7 @@ def jit_cache(fn):
         # 3. Compile
         misses += 1
         compiled_fn = fn(*args, **kwargs)
-        compiled_entry = CompiledKernel(compiled_fn, sha) if DEBUG_CACHE else compiled_fn
+        compiled_entry = compiled_fn
 
         # 4. Store
         cache[cache_key] = compiled_entry
