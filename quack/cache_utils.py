@@ -32,7 +32,6 @@ import tvm_ffi
 CACHE_ENABLED: bool = os.getenv("QUACK_CACHE_ENABLED", "1") == "1"
 CACHE_DIR: str | None = os.getenv("QUACK_CACHE_DIR", None)
 COMPILE_ONLY: bool = False
-DEBUG_CACHE: bool = os.getenv("QUACK_CACHE_DEBUG", "0") == "1"
 
 # Downstream projects can append directories here to include their sources
 # in the cache fingerprint. Must be set before the first jit_cache call.
@@ -63,14 +62,12 @@ class LoadedKernel:
         self._first_call_done = False
 
     def __call__(self, *args, **kwargs):
-        _debug_log("loaded_fn_call_begin", fn=type(self._fn).__name__)
         if not self._first_call_done:
             with FileLock(_first_call_lock_path(self._sha), exclusive=True, timeout=LOCK_TIMEOUT):
                 out = self._fn(*args, **kwargs)
             self._first_call_done = True
         else:
             out = self._fn(*args, **kwargs)
-        _debug_log("loaded_fn_call_end", fn=type(self._fn).__name__)
         return out
 
     def __getattr__(self, name):
@@ -85,57 +82,11 @@ class CompiledKernel:
         self._sha = sha
 
     def __call__(self, *args, **kwargs):
-        _debug_log("compiled_fn_call_begin", sha=self._sha, fn=type(self._fn).__name__)
         out = self._fn(*args, **kwargs)
-        _debug_log("compiled_fn_call_end", sha=self._sha, fn=type(self._fn).__name__)
         return out
 
     def __getattr__(self, name):
         return getattr(self._fn, name)
-
-
-def _debug_log(event: str, **fields) -> None:
-    if not DEBUG_CACHE:
-        return
-    rank = os.getenv("RANK", "?")
-    local_rank = os.getenv("LOCAL_RANK", "?")
-    host = os.uname().nodename
-    pid = os.getpid()
-    payload = " ".join(f"{key}={value}" for key, value in fields.items())
-    print(
-        f"[quack-cache] event={event} host={host} pid={pid} rank={rank} local_rank={local_rank} {payload}",
-        flush=True,
-    )
-
-
-def _format_cache_value(value) -> str:
-    if value is None:
-        return "None"
-    if isinstance(value, tuple):
-        return "(" + ",".join(_format_cache_value(v) for v in value) + ")"
-    return str(value)
-
-
-def _summarize_cache_key(fn_name: str, cache_key: tuple) -> str:
-    if fn_name == "_compile_rmsnorm_fwd" and len(cache_key) >= 10:
-        dtype, out_dtype, res_dtype, weight_dtype, bias_dtype, res_out_dtype, N, has_rstd, has_mean, is_layernorm = cache_key[:10]
-        return (
-            "rmsnorm_fwd("
-            f"N={N},dtype={_format_cache_value(dtype)},out={_format_cache_value(out_dtype)},"
-            f"res={_format_cache_value(res_dtype)},w={_format_cache_value(weight_dtype)},"
-            f"bias={_format_cache_value(bias_dtype)},res_out={_format_cache_value(res_out_dtype)},"
-            f"rstd={has_rstd},mean={has_mean},layernorm={is_layernorm})"
-        )
-    if fn_name == "_compile_rmsnorm_bwd" and len(cache_key) >= 9:
-        N, dtype, dout_dtype, dx_dtype, weight_dtype, has_db_partial, dres_dtype, dres_out_dtype, has_dw_partial = cache_key[:9]
-        return (
-            "rmsnorm_bwd("
-            f"N={N},dtype={_format_cache_value(dtype)},dout={_format_cache_value(dout_dtype)},"
-            f"dx={_format_cache_value(dx_dtype)},w={_format_cache_value(weight_dtype)},"
-            f"db_partial={has_db_partial},dres={_format_cache_value(dres_dtype)},"
-            f"dres_out={_format_cache_value(dres_out_dtype)},dw_partial={has_dw_partial})"
-        )
-    return repr(cache_key)
 
 
 def get_cache_path() -> Path:
@@ -207,19 +158,9 @@ def _export_func_name(sha: str) -> str:
 
 
 def _load_cached_module(o_path: Path, export_func_name: str):
-    _debug_log(
-        "load_module_begin",
-        path=o_path,
-        export=export_func_name,
-    )
     _preload_runtime_libraries()
     with FileLock(_load_module_lock_path(), exclusive=True, timeout=LOCK_TIMEOUT):
         module = cute.runtime.load_module(str(o_path), enable_tvm_ffi=True)
-    _debug_log(
-        "load_module_end",
-        path=o_path,
-        export=export_func_name,
-    )
     return module
 
 
@@ -330,7 +271,6 @@ def jit_cache(fn):
     def wrapper(*args, **kwargs):
         nonlocal hits, misses
         cache_key = args + tuple(sorted(kwargs.items())) if kwargs else args
-        key_summary = _summarize_cache_key(fn.__qualname__, cache_key)
         disk_key = (fn.__qualname__,) + cache_key
         sha = _key_to_hash(disk_key)
 
@@ -348,37 +288,19 @@ def jit_cache(fn):
             export_func_name = _export_func_name(sha)
             try:
                 with FileLock(lock_path, exclusive=False, timeout=LOCK_TIMEOUT):
-                    if o_path.exists():
-                        if _should_fallback_to_compile(sha):
-                            _debug_log(
-                                "disk_hit_fallback_compile",
-                                sha=sha,
-                                path=o_path,
-                                loaded=len(_LOADED_CACHE_SHAS),
-                                key=key_summary,
-                            )
-                        else:
-                            _debug_log(
-                                "disk_hit",
-                                sha=sha,
-                                path=o_path,
-                                fn=fn.__qualname__,
-                                key=key_summary,
-                            )
-                            m = _load_cached_module(o_path, export_func_name)
-                            loaded_fn = _load_cached_function(m, export_func_name)
-                            loaded = LoadedKernel(m, loaded_fn, sha)
-                            cache[cache_key] = loaded
-                            _LOADED_CACHE_SHAS.add(sha)
-                            hits += 1
-                            return _noop_kernel if COMPILE_ONLY else loaded
+                    if o_path.exists() and not _should_fallback_to_compile(sha):
+                        m = _load_cached_module(o_path, export_func_name)
+                        loaded_fn = _load_cached_function(m, export_func_name)
+                        loaded = LoadedKernel(m, loaded_fn, sha)
+                        cache[cache_key] = loaded
+                        _LOADED_CACHE_SHAS.add(sha)
+                        hits += 1
+                        return _noop_kernel if COMPILE_ONLY else loaded
             except RuntimeError:
                 pass
 
         # 3. Compile
         misses += 1
-        if CACHE_ENABLED:
-            _debug_log("compile_miss", sha=sha, fn=fn.__qualname__, key=key_summary)
         compiled_fn = fn(*args, **kwargs)
         compiled_entry = CompiledKernel(compiled_fn, sha) if DEBUG_CACHE else compiled_fn
 
@@ -389,21 +311,7 @@ def jit_cache(fn):
                 with FileLock(lock_path, exclusive=True, timeout=LOCK_TIMEOUT):
                     if not o_path.exists():
                         o_path.parent.mkdir(parents=True, exist_ok=True)
-                        _debug_log(
-                            "export_begin",
-                            sha=sha,
-                            path=o_path,
-                            fn=fn.__qualname__,
-                            key=key_summary,
-                        )
                         _export_compiled_artifact(compiled_fn, o_path, export_func_name)
-                        _debug_log(
-                            "export_end",
-                            sha=sha,
-                            path=o_path,
-                            fn=fn.__qualname__,
-                            key=key_summary,
-                        )
             except Exception as e:
                 print(f"quack cache: export failed for key {sha}: {e}")
 
